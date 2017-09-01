@@ -2,6 +2,7 @@ import java.io.BufferedOutputStream;
 import java.io.Console;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -39,7 +40,7 @@ public class Encrypter
 
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
 
-	public static void encrypt(File f, String root, String mdp) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException
+	public static void encrypt(File f, String root, String mdp, String tip) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException
 	{
 		Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, mdp);
 
@@ -64,7 +65,7 @@ public class Encrypter
 		{
 			for (File ff : f.listFiles())
 			{
-				encrypt(ff,f.getAbsolutePath(), mdp);
+				encrypt(ff,f.getAbsolutePath(), mdp, tip);
 			}
 			Files.move(f.toPath(), f2.toPath());
 		}
@@ -73,6 +74,9 @@ public class Encrypter
 			FileInputStream fis = new FileInputStream(f);
 			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(f2,false));
 			DataOutputStream dos = new DataOutputStream(bos);
+
+			dos.writeInt(tip.length());
+			dos.write(tip.getBytes());
 			byte[] data=new byte[PACKET_SIZE];
 			while (fis.read(data)!=-1)
 			{
@@ -99,11 +103,10 @@ public class Encrypter
 		}
 	}
 
-	public static void decrypt(File f, String root, String mdp) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, IOException
+	public static void decrypt(File f, String root, String mdp) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, IOException, EOFException, BadPaddingException
 	{
-
 		Cipher desCipher=initCipher(Cipher.DECRYPT_MODE, mdp);
-
+		boolean ok=true;
 		String name;
 		try
 		{
@@ -121,7 +124,8 @@ public class Encrypter
 		}
 		catch (Exception e)
 		{
-			name = root + "/" + f.getName();
+			ok=false;
+			name = root + "/" + f.getName()+"tmp";
 		}
 		File f2 = new File(name);
 
@@ -131,7 +135,8 @@ public class Encrypter
 			{
 				decrypt(ff, f.getAbsolutePath(),  mdp);
 			}
-			Files.move(f.toPath(), f2.toPath());
+			if (ok)
+				Files.move(f.toPath(), f2.toPath());
 		}
 		else
 		{
@@ -140,28 +145,41 @@ public class Encrypter
 			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(f2,false));
 			int sz;
 			byte[] decryptedFile = null;
-			while ((sz=dis.readInt())!=-1)
+			try
 			{
-				byte[] data = new byte[sz];
-				dis.readFully(data);
-				try
+				int tipSz=dis.readInt();
+				dis.readFully(new byte[tipSz]);
+				while ((sz=dis.readInt())!=-1)
 				{
+					byte[] data = new byte[sz];
+					dis.readFully(data);
 					decryptedFile = desCipher.doFinal(data);
-				} catch (BadPaddingException e)
-				{
-					e.printStackTrace();
+					for (int i=0;i<decryptedFile.length;i++)
+					{
+						bos.write(decryptedFile[i]);
+						current+=1;
+					}
 				}
-				for (int i=0;i<decryptedFile.length;i++)
+			} catch (EOFException e)
+			{
+				ok=false;
+				throw new EOFException();
+			} catch (NegativeArraySizeException e)
+			{
+				ok=false;
+				throw new NegativeArraySizeException();
+			} finally {
+				dis.close();
+				bos.close();
+				if (ok)
 				{
-					bos.write(decryptedFile[i]);
-					current+=1;
+					Files.delete(f.toPath());
+				}
+				else
+				{
+					Files.delete(f2.toPath());
 				}
 			}
-
-			fis.close();
-			bos.close();
-
-			Files.delete(f.toPath());
 		}
 	}
 
@@ -189,13 +207,13 @@ public class Encrypter
 
 	private static SecretKeySpec initSecretKey(String password) throws UnsupportedEncodingException, NoSuchAlgorithmException
 	{
-			byte[] key = password.getBytes("UTF-8");
-			MessageDigest sha = MessageDigest.getInstance("SHA-1");
-			key = sha.digest(key);
-			key = Arrays.copyOf(key, 16); // use only first 128 bit
-			return new SecretKeySpec(key, "AES");
+		byte[] key = password.getBytes("UTF-8");
+		MessageDigest sha = MessageDigest.getInstance("SHA-1");
+		key = sha.digest(key);
+		key = Arrays.copyOf(key, 16); // use only first 128 bit
+		return new SecretKeySpec(key, "AES");
 	}
-	
+
 	private static Cipher initCipher(int mode, String mdp) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, UnsupportedEncodingException
 	{
 		SecretKeySpec skeySpec = initSecretKey(mdp);
@@ -203,37 +221,56 @@ public class Encrypter
 		cipher.init(mode, skeySpec);
 		return cipher;
 	}
-	
-	private static void changePassword(Console c, Cipher encrCipher) throws IllegalBlockSizeException, BadPaddingException
-	{
-		System.out.println("Choisissez un mot de passe : (au moins 8 caractères)");
-		char[] newPass=c.readPassword();
-		while (newPass.length<8)
-		{
-			System.out.println("Mot de passe trop court !");
-			System.out.println("Choisissez un mot de passe : (au moins 8 caractères)");
-			newPass = c.readPassword();
-		}
-		System.out.println("Confirmez votre mot de passe :");
-		char[] confirmNewPass=c.readPassword();
 
-		while (!new String(newPass).equals(new String(confirmNewPass)))
+	private static void changePassword(Console c, Cipher encrCipher)
+	{
+		String newPass = null, confirmNewPass;
+		boolean ok=false;
+		while (!ok)
 		{
-			System.out.println("Les mots de passes ne sont pas identiques !");
-			System.out.println("Choisissez un mot de passe : (au moins 8 caractères)");
-			newPass = c.readPassword();
-			System.out.println("Confirmez votre mot de passe :");
-			confirmNewPass=c.readPassword();
+			ok=true;
+			System.out.println("Choisissez un mot de passe MyEncripterTool : (au moins 8 caractères)");
+			newPass =  new String(c.readPassword());
+			if (newPass.length()<8)
+			{
+				ok=false;
+				System.out.println("Mot de passe trop court !");
+			}
+			else
+			{
+				System.out.println("Confirmez votre mot de passe :");
+				confirmNewPass=new String(c.readPassword());
+				if (!newPass.equals(confirmNewPass))
+				{
+					ok=false;
+					System.out.println("Mots de passe saisis différent.");
+				}
+			}
 		}
 		KEY=new String(newPass);
 
-		System.out.println("Ecrivez une phrase de rappel de votre mot de passe :");
+		System.out.println("Ecrivez une phrase de rappel de votre mot de passe MyEncripterTool :");
 		KEY_TIP=c.readLine();
-		
-		pref.putByteArray("password",encrCipher.doFinal(KEY.getBytes()));
+
+		try
+		{
+			pref.putByteArray("password",encrCipher.doFinal(KEY.getBytes()));
+		} catch (IllegalBlockSizeException | BadPaddingException e)
+		{
+			System.out.println("Echec du changement de mot de passe.");
+			try
+			{
+				Thread.sleep(2000);
+			} catch (InterruptedException e1)
+			{
+				e1.printStackTrace();
+			}
+			System.exit(0);
+		}
 		pref.put("tip", KEY_TIP);
+		System.out.println("Nouveau mot de passe enregistré.");
 	}
-	
+
 	private static void initPrintStateThread()
 	{
 		printStateThread=new Thread(new Runnable()
@@ -257,7 +294,34 @@ public class Encrypter
 			}
 		});
 	}
-	
+
+	private static void printStart(String[] args, boolean encrMode)
+	{
+		System.out.println("*************************************************************");
+		if (args.length==2)
+		{
+			File f = new File(args[1]);
+			if (encrMode)
+				System.out.println("ENCRYPTAGE DU FICHIER : \n     - "+f.getAbsolutePath());
+			else
+				System.out.println("DECRYPTAGE DU FICHIER : \n     - "+f.getAbsolutePath());
+		}
+		else
+		{
+			if (encrMode)
+				System.out.println("ENCRYPTAGE DES FICHIERS : ");
+			else
+				System.out.println("DECRYPTAGE DES FICHIERS : ");
+			for (int i = 1 ; i < args.length ; i++)
+			{
+				File f = new File(args[i]);
+				System.out.println("     - "+f.getAbsolutePath());
+			}
+		}
+		System.out.println("*************************************************************");
+		System.out.println("");
+	}
+
 	public static void main(String[] args) throws InterruptedException, BackingStoreException
 	{
 		try
@@ -267,11 +331,12 @@ public class Encrypter
 
 		Console c = System.console();
 
+		Cipher desCipher=null;
+		Cipher encrCipher=null;
 		try
 		{
-			Cipher desCipher=initCipher(Cipher.DECRYPT_MODE, MASTER_KEY);
-			Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, MASTER_KEY);
-
+			desCipher=initCipher(Cipher.DECRYPT_MODE, MASTER_KEY);
+			encrCipher=initCipher(Cipher.ENCRYPT_MODE, MASTER_KEY);
 			byte[] encrKEY = pref.getByteArray("password", null);
 			if (encrKEY==null)
 			{
@@ -279,6 +344,7 @@ public class Encrypter
 			}
 			else
 			{
+				KEY_TIP=pref.get("tip",null);
 				KEY=new String(desCipher.doFinal(encrKEY));
 			}
 		} catch (Exception e)
@@ -287,12 +353,12 @@ public class Encrypter
 			Thread.sleep(10000);
 			System.exit(0);
 		}
-		
-		if (args.length!=2)
+
+		if (args.length<2)
 		{
 			System.out.println("Encrypter : ");
 			System.out.println("1er argument : Mode, E pour encrypter, D pour décrypter.");
-			System.out.println("2e argument  : Fichier, écrire le chemin vers le fichier à encrypter/décrypter.");
+			System.out.println("autres arguments  : Fichier(s), écrire le(s) chemin(s) vers le(s) fichier(s) à encrypter/décrypter.");
 			Thread.sleep(10000);
 			System.exit(0);
 		}
@@ -314,64 +380,170 @@ public class Encrypter
 			System.exit(0);
 		}
 
-		File f=new File(args[1]);
+		printStart(args,encrMode);
 
-		System.out.println("*************************************************************");
-		if (encrMode)
-			System.out.println("ENCRYPTAGE DU FICHIER : "+f.getName());
-		else
-			System.out.println("DECRYPTAGE DU FICHIER : "+f.getName());
-		System.out.println("*************************************************************");
-		System.out.println("");
 
-		System.out.println("Mot de passe ? (R pour un rappel)");
-		String key = new String(c.readPassword());
 
-		if (key.equals("R") || key.equals("r"))
+		boolean mdpOk=false;
+		while (!mdpOk)
 		{
-			System.out.println(KEY_TIP);
-			System.out.println("Mot de passe ?");
-			key = new String(c.readPassword());
+			mdpOk=true;
+			System.out.println("Mot de passe MyEncripterTool? (R pour un rappel, C pour modifier)");
+			String key = new String(c.readPassword());
+
+			if (!key.equals(KEY))
+			{
+				mdpOk=false;
+				if (key.equals("R") || key.equals("r"))
+					System.out.println(KEY_TIP);
+				else if (key.equals("C") || key.equals("c"))
+				{
+					boolean modif=false;
+					while (!modif)
+					{
+						modif=true;
+						System.out.println("Ancien mot de passe? (R pour un rappel)");
+						String oldPass = new String(c.readPassword());
+						if (!oldPass.equals(KEY))
+						{
+							modif=false;
+							if (oldPass.equals("R") || oldPass.equals("r"))
+								System.out.println(KEY_TIP);
+							else
+							{
+								System.out.println("Mot de passe invalide.");
+							}
+						}
+					}
+					changePassword(c, encrCipher);
+				}
+				else
+					System.out.println("Mot de passe invalide.");
+			}
 		}
 
-
-		while (!key.equals(KEY))
+		String mdp=null,confirm, tip=null;
+		if (args[0].equals("E") || args[0].equals("e")) 
 		{
-			if (key.equals("R") || key.equals("r"))
-				System.out.println(KEY_TIP);
-			else
-				System.out.println("Mauvais mot de passe !");
-
-			System.out.println("Mot de passe ?");
-			key = new String(c.readPassword());
+			mdpOk=false;
+			while (!mdpOk)
+			{
+				mdpOk=true;
+				System.out.println("Mot de passe à appliquer à ce(s) fichier(s) (Au moins 6 caractères) :");
+				mdp = new String(c.readPassword());
+				if (mdp.length()<6)
+				{
+					mdpOk=false;
+					System.out.println("Mot de passe trop court.");
+				}
+				else
+				{
+					System.out.println("Confirmer ce mot de passe :");
+					confirm=new String(c.readPassword());
+					if (!mdp.equals(confirm))
+					{
+						mdpOk=false;
+						System.out.println("Mots de passe saisis différents.");
+					}
+				}
+			}
+			System.out.println("Ecrivez une phrase de rappel de votre mot de passe pour ce(s) fichier(s) :");
+			tip=c.readLine();
+		}
+		else if (args[0].equals("D")) 
+		{
+			for (int i=1;i<args.length;i++)
+			{
+				File f=new File(args[i]);
+				FileInputStream fis;
+				DataInputStream dis;
+				try
+				{
+					fis = new FileInputStream(f);
+					dis = new DataInputStream(fis);
+					int tipSz=dis.readInt();
+					byte[] tipArray=new byte[tipSz];
+					dis.readFully(tipArray);
+					tip=new String(tipArray);
+					fis.close();
+					dis.close();
+				} catch (Exception e) 
+				{
+					tip=null;
+				}
+				if (tip!=null)
+					break;
+			}
+			if (tip==null)
+			{
+				System.out.println("Ce(s) fichier(s) ne sont pas encryptés.");
+				Thread.sleep(2000);
+				System.exit(0);
+			}
+			boolean mdpChoisi=false;
+			while (!mdpChoisi)
+			{
+				mdpChoisi=true;
+				System.out.println("Mot de passe pour dévérouiller ce(s) fichier(s) ? (R pour un rappel)");
+				mdp = new String(c.readPassword());
+				if (mdp.equals("r") || mdp.equals("R"))
+				{
+					mdpChoisi=false;
+					System.out.println(tip);
+				}
+			}
+		}
+		else 
+		{
+			System.out.println("Ordre invalide (ni Decrypt, ni Encrypt).");
+			Thread.sleep(2000);
+			System.exit(0);
 		}
 
-
-		try
+		for (int i=1;i<args.length;i++)
 		{
+			boolean success=true;
+			String log="";
+			File f = new File(args[i]);
+			String fileName = f.getName();
+
 			running=true;
-
 			totalSize=totalLength(f);
+			current=0;
 			initPrintStateThread();
 			printStateThread.start();
-			if (args[0].equals("E") || args[0].equals("e")) encrypt(f,f.getParent(),KEY);
-			else if (args[0].equals("D")) decrypt(f,f.getParent(), KEY);
-			else System.exit(0);
-		}
-		catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException e)
-		{
-			e.printStackTrace();
-			Thread.sleep(10000);
-		} catch (IllegalBlockSizeException e)
-		{
+
+			try
+			{
+				if (args[0].equals("E") || args[0].equals("e")) 
+					encrypt(f,f.getParent(),mdp, tip);
+				else if (args[0].equals("D")) 
+					decrypt(f,f.getParent(), mdp);
+			} catch (BadPaddingException e)
+			{
+				success=false;
+				running=false;
+				log="Mot de passe invalide.";
+				Thread.sleep(150);
+			} catch (NegativeArraySizeException | IllegalBlockSizeException | EOFException e)
+			{
+				success=false;
+				running=false;
+				log="Fichier est déjà décrypté.";
+				Thread.sleep(150);
+			} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException e)
+			{
+				success=false;
+				running=false;
+				log=e.getMessage();
+				Thread.sleep(150);
+			}
 			running=false;
-			System.out.println("\rVotre fichier est déjà décrypté.           \r");
-			Thread.sleep(2000);
+			Thread.sleep(10);
+			System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
+			Thread.sleep(150);
 		}
-		running=false;
-		Thread.sleep(10);
-		System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+" Réussi !");
-		Thread.sleep(800);
+		Thread.sleep(2000);
 	}
 
 }

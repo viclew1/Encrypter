@@ -35,7 +35,7 @@ public class Encrypter
 	public static String KEY;
 	public static String KEY_TIP;
 	public static Preferences pref =  Preferences.userNodeForPackage( Encrypter.class );
-	public static Thread printStateThread,fileAnalysisThread;
+	public static Thread printStateThread,printAnalysisThread;
 	public static boolean running;
 	public static double totalSize;
 	public static double current=0;
@@ -44,8 +44,13 @@ public class Encrypter
 	public static Console c = System.console();
 	public static Cipher MASTERdesCipher;
 	public static Cipher MASTERencrCipher;
+	public static List<String> tips = new ArrayList<>();
 	public static List<String> nonCryptedFiles=new ArrayList<>();
-
+	public static int nbFail,nbFile;
+	public static int totalFilesToScan,currentFileScanned=0;
+	
+	public static String TAG = "CryptedByMyEncrypterTool";
+	public static String ENCRYPTED_TAG;
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
 
 	public static void encrypt(File f) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException, CantEncryptException
@@ -85,6 +90,7 @@ public class Encrypter
 
 			try
 			{
+				dos.write(ENCRYPTED_TAG.getBytes());
 				byte[] encrTip=MASTERencrCipher.doFinal(tip.getBytes());
 				dos.writeInt(encrTip.length);
 				dos.write(encrTip);
@@ -151,11 +157,15 @@ public class Encrypter
 		{
 			for (File ff : f.listFiles())
 			{
+				if (nonCryptedFiles.contains(ff.getName()))
+					continue;
+				if (!ff.isDirectory())
+					nbFile++;
 				try {
 					decrypt(ff);
 				} catch (Exception e)
 				{
-
+					nbFail++;
 				}
 			}
 			if (ok)
@@ -170,6 +180,9 @@ public class Encrypter
 			byte[] decryptedFile = null;
 			try
 			{
+				byte[] tagArray = new byte[ENCRYPTED_TAG.length()];
+				dis.readFully(tagArray);
+				MASTERdesCipher.doFinal(tagArray);
 				int tipSz=dis.readInt();
 				dis.readFully(new byte[tipSz]);
 				while ((sz=dis.readInt())!=-1)
@@ -294,6 +307,31 @@ public class Encrypter
 		System.out.println("Nouveau mot de passe enregistré.");
 	}
 
+	private static void initPrintAnalysesThread()
+	{
+		printAnalysisThread=new Thread(new Runnable()
+		{
+
+			@Override
+			public void run()
+			{
+				System.out.println("");
+				System.out.print("\rAnalyse des fichiers en cours : "+currentFileScanned+"/"+totalFilesToScan+"\r");
+				while (running)
+				{
+					System.out.print("\rAnalyse des fichiers en cours : "+currentFileScanned+"/"+totalFilesToScan+"                       \r");
+					try
+					{
+						Thread.sleep(5);
+					} catch (InterruptedException e)
+					{
+						e.printStackTrace();
+					}
+				}
+			}
+		});
+	}
+	
 	private static void initPrintStateThread()
 	{
 		printStateThread=new Thread(new Runnable()
@@ -314,41 +352,6 @@ public class Encrypter
 					{
 						e.printStackTrace();
 					}
-				}
-			}
-		});
-	}
-
-	private static void initFileAnalysisThread()
-	{
-		fileAnalysisThread=new Thread(new Runnable()
-		{
-
-			String symbol="-";
-
-			@Override
-			public void run()
-			{
-				System.out.println("");
-				System.out.print("\rAnalyse des fichiers en cours : "+symbol+"\r");
-				while (running)
-				{
-					System.out.print("\rAnalyse des fichiers en cours : "+symbol+"                       \r");
-					try
-					{
-						Thread.sleep(100);
-					} catch (InterruptedException e)
-					{
-						e.printStackTrace();
-					}
-					if (symbol.equals("-"))
-						symbol="\\";
-					else if (symbol.equals("\\"))
-						symbol="|";
-					else if (symbol.equals("|"))
-						symbol="/";
-					else if (symbol.equals("/"))
-						symbol="-";
 				}
 			}
 		});
@@ -392,6 +395,7 @@ public class Encrypter
 		{
 			MASTERdesCipher=initCipher(Cipher.DECRYPT_MODE, MASTER_KEY);
 			MASTERencrCipher=initCipher(Cipher.ENCRYPT_MODE, MASTER_KEY);
+			ENCRYPTED_TAG=new String(MASTERencrCipher.doFinal(TAG.getBytes()));
 			byte[] encrKEY = pref.getByteArray("password", null);
 			if (encrKEY==null)
 			{
@@ -507,24 +511,17 @@ public class Encrypter
 		}
 		else if (args[0].equals("D")) 
 		{
-			initFileAnalysisThread();
+			totalFilesToScan=nbFile(args);
+			initPrintAnalysesThread();
 			running=true;
-			fileAnalysisThread.start();
+			printAnalysisThread.start();
 			Thread.sleep(10);
 
-			List<String> tips=new ArrayList<>();
-			for (int i=1;i<args.length;i++)
-			{
-				File f=new File(args[i]);
-				String fileTip = getTipFromFile(f);
-				if (fileTip==null)
-					nonCryptedFiles.add(f.getName());
-				else if (!tips.contains(fileTip))
-					tips.add(fileTip);
-			}
-
+			generateTipsAndNonCryptedFilesList(args);
 			running=false;
 
+			Thread.sleep(100);
+			
 			if (tips.isEmpty())
 			{
 				System.out.println("Ce(s) fichier(s) ne sont pas encryptés.");
@@ -558,6 +555,8 @@ public class Encrypter
 			String fileName = f.getName();
 			if (!nonCryptedFiles.contains(fileName))
 			{
+				nbFile=0;
+				nbFail=0;
 				running=true;
 				totalSize=totalLength(f);
 				current=0;
@@ -567,22 +566,30 @@ public class Encrypter
 				boolean success=doAction(args,f);
 
 				Thread.sleep(10);
-				System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
+				if (!f.isDirectory())
+					System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
+				else
+					System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+" Réussi : "+"("+(nbFile-nbFail)+"/"+nbFile+") : "+ fileName);
 				Thread.sleep(150);
 			}
 		}
 		Thread.sleep(2000);
 	}
 
-	private static String getTipFromFile(File f)
+	private static List<String> getTipFromFile(File f)
 	{
+		List<String> tips=new ArrayList<>();
 		String tip=null;
 		if (!f.isDirectory())
 		{
 			try
 			{
+				currentFileScanned++;
 				FileInputStream fis = new FileInputStream(f);
 				DataInputStream dis = new DataInputStream(fis);
+				byte[] tagArray = new byte[ENCRYPTED_TAG.length()];
+				dis.readFully(tagArray);
+				MASTERdesCipher.doFinal(tagArray);
 				int tipSz=dis.readInt();
 				byte[] tipArrayEncr=new byte[tipSz];
 				dis.readFully(tipArrayEncr);
@@ -590,18 +597,22 @@ public class Encrypter
 				tip=new String(tipArray);
 				fis.close();
 				dis.close();
-			} catch (Exception e) {}
+				tips.add(tip);
+			} catch (Exception e) {
+				if (!nonCryptedFiles.contains(f.getName()))
+					nonCryptedFiles.add(f.getName());
+			}
 		}
 		else
 		{
+			currentFileScanned++;
 			for (File ff : f.listFiles())
-			{
-				String subFileTip=getTipFromFile(ff);
-				if (subFileTip!=null)
-					return subFileTip;
-			}
+				for (String str : getTipFromFile(ff))
+					tips.add(str);
+			if (tips.isEmpty() && !nonCryptedFiles.contains(f.getName()))
+				nonCryptedFiles.add(f.getName());
 		}
-		return tip;
+		return tips;
 	}
 
 	private static boolean doAction(String[] args, File f) throws InterruptedException, IOException
@@ -617,57 +628,98 @@ public class Encrypter
 		{
 			success=false;
 			running=false;
-
-			tip=getTipFromFile(f);
-
-			log="Mot de passe invalide.";
-			if (!nToAll && (args[0].equals("d") || args[0].equals("D")))
-			{
-				System.out.println("Mot de passe invalide, en essayer un autre ? (o/n)");
-				String retry=c.readLine();
-				if (retry.equals("o") || retry.equals("O"))
-				{
-					boolean mdpChoisi=false;
-					while (!mdpChoisi)
-					{
-						mdpChoisi=true;	
-						System.out.println("Nouveau mot de passe : (R pour un rappel)");
-						mdp = new String(c.readPassword());
-						if (mdp.equals("r") || mdp.equals("R"))
-						{
-							mdpChoisi=false;
-							System.out.println(" - "+tip);
-						}
-					}
-					return doAction(args, f);
-				}
-				else if (retry.equals("n") || retry.equals("N"))
-				{
-					System.out.println("Redemander en cas d'erreur pour les autres fichiers ? (o/n)");
-					String noForever=c.readLine();
-					if (noForever.equals("o") || noForever.equals("O"))
-						nToAll=false;
-					else
-						nToAll=true;
-				}
-			}
-			Thread.sleep(150);
+			success = retryDecrypt(f,args);
 		} catch (NegativeArraySizeException | IllegalBlockSizeException | EOFException e)
 		{
 			success=false;
 			running=false;
 			log="Fichier est déjà décrypté.";
-			Thread.sleep(150);
 		} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException | CantEncryptException e)
 		{
 			success=false;
 			running=false;
 			log=e.getMessage();
-			Thread.sleep(150);
 		}
 		running=false;
-		log="";
+		if (!nToAll && nbFile!=0 && nbFail==nbFile)
+		{
+			success = retryDecrypt(f, args);
+		}
+		if (success)
+			log="";
+		Thread.sleep(150);
 		return success;
 	}
 
+	private static boolean retryDecrypt(File f, String[] args) throws InterruptedException, IOException
+	{
+		List<String> tips=getTipFromFile(f);
+
+		log="Mot de passe invalide.";
+		if (!nToAll && (args[0].equals("d") || args[0].equals("D")))
+		{
+			System.out.println("Mot de passe invalide, en essayer un autre ? (o/n)");
+			String retry=c.readLine();
+			if (retry.equals("o") || retry.equals("O"))
+			{
+				boolean mdpChoisi=false;
+				while (!mdpChoisi)
+				{
+					mdpChoisi=true;	
+					System.out.println("Nouveau mot de passe : (R pour un rappel)");
+					mdp = new String(c.readPassword());
+					if (mdp.equals("r") || mdp.equals("R"))
+					{
+						mdpChoisi=false;
+						for (String tip : tips)
+							System.out.println(" - "+tip);
+					}
+				}
+				return doAction(args, f);
+			}
+			else if (retry.equals("n") || retry.equals("N"))
+			{
+				System.out.println("Redemander en cas d'erreur pour les autres fichiers ? (o/n)");
+				String noForever=c.readLine();
+				if (noForever.equals("o") || noForever.equals("O"))
+					nToAll=false;
+				else
+					nToAll=true;
+			}
+		}
+		return false;
+	}
+
+	private static void generateTipsAndNonCryptedFilesList(String[] args)
+	{
+		for (int i=1;i<args.length;i++)
+		{
+			File f=new File(args[i]);
+			List<String> fileTips = getTipFromFile(f);
+			for (String fileTip : fileTips)
+				if (!tips.contains(fileTip))
+					tips.add(fileTip);
+		}
+	}
+
+	private static int nbFile(File f)
+	{
+		if (!f.isDirectory())
+			return 1;
+		int cpt=1;
+		for (File ff : f.listFiles())
+			cpt+=nbFile(ff);
+		return cpt;
+
+	}
+
+	private static int nbFile(String[] args)
+	{
+		int cpt=0;
+		for (int i=1;i<args.length;i++)
+		{
+			cpt+=nbFile(new File(args[i]));
+		}
+		return cpt;
+	}
 }

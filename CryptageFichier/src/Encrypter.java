@@ -13,8 +13,10 @@ import java.nio.file.Files;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 import java.util.prefs.BackingStoreException;
 import java.util.prefs.Preferences;
 
@@ -322,7 +324,7 @@ public class Encrypter
 		System.out.println("");
 	}
 
-	public static void main(String[] args) throws InterruptedException, BackingStoreException
+	public static void main(String[] args) throws InterruptedException, BackingStoreException, IOException
 	{
 		try
 		{
@@ -452,6 +454,7 @@ public class Encrypter
 		}
 		else if (args[0].equals("D")) 
 		{
+			List<String> tips=new ArrayList<>();
 			for (int i=1;i<args.length;i++)
 			{
 				File f=new File(args[i]);
@@ -467,12 +470,11 @@ public class Encrypter
 					tip=new String(tipArray);
 					fis.close();
 					dis.close();
+					if (!tips.contains(tip))
+						tips.add(tip);
 				} catch (Exception e) 
 				{
-					tip=null;
 				}
-				if (tip!=null)
-					break;
 			}
 			if (tip==null)
 			{
@@ -484,12 +486,13 @@ public class Encrypter
 			while (!mdpChoisi)
 			{
 				mdpChoisi=true;
-				System.out.println("Mot de passe pour dévérouiller ce(s) fichier(s) ? (R pour un rappel)");
+				System.out.println("Mot de passe pour dévérouiller ce(s) fichier(s) ? (R pour des rappels)");
 				mdp = new String(c.readPassword());
 				if (mdp.equals("r") || mdp.equals("R"))
 				{
 					mdpChoisi=false;
-					System.out.println(tip);
+					for (String t : tips)
+						System.out.println(" - "+t);
 				}
 			}
 		}
@@ -502,10 +505,9 @@ public class Encrypter
 
 		for (int i=1;i<args.length;i++)
 		{
-			boolean success=true;
-			String log="";
 			File f = new File(args[i]);
 			String fileName = f.getName();
+			String log="";
 
 			running=true;
 			totalSize=totalLength(f);
@@ -513,37 +515,77 @@ public class Encrypter
 			initPrintStateThread();
 			printStateThread.start();
 
-			try
-			{
-				if (args[0].equals("E") || args[0].equals("e")) 
-					encrypt(f,f.getParent(),mdp, tip);
-				else if (args[0].equals("D")) 
-					decrypt(f,f.getParent(), mdp);
-			} catch (BadPaddingException e)
-			{
-				success=false;
-				running=false;
-				log="Mot de passe invalide.";
-				Thread.sleep(150);
-			} catch (NegativeArraySizeException | IllegalBlockSizeException | EOFException e)
-			{
-				success=false;
-				running=false;
-				log="Fichier est déjà décrypté.";
-				Thread.sleep(150);
-			} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException e)
-			{
-				success=false;
-				running=false;
-				log=e.getMessage();
-				Thread.sleep(150);
-			}
-			running=false;
+			boolean success=false;
+			success = doAction(c,args,f,mdp,tip,log);
+
 			Thread.sleep(10);
 			System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
 			Thread.sleep(150);
 		}
 		Thread.sleep(2000);
+	}
+
+	private static boolean doAction(Console c, String[] args, File f, String mdp, String tip, String log) throws InterruptedException, IOException
+	{
+		boolean success=true;
+		try
+		{
+			if (args[0].equals("E") || args[0].equals("e")) 
+				encrypt(f,f.getParent(),mdp, tip);
+			else if (args[0].equals("D")) 
+				decrypt(f,f.getParent(), mdp);
+		} catch (BadPaddingException e)
+		{
+			success=false;
+			running=false;
+
+			FileInputStream fis= new FileInputStream(f);
+			DataInputStream dis = new DataInputStream(fis);
+			int tipSz=dis.readInt();
+			byte[] tipArray=new byte[tipSz];
+			dis.readFully(tipArray);
+			String newTip=new String(tipArray);
+			fis.close();
+			dis.close();
+
+			log="Mot de passe invalide.";
+			if (args[0].equals("d") || args[0].equals("D"))
+			{
+				System.out.println("Mot de passe invalide, en essayer un autre ? (o/n)");
+				String retry=c.readLine();
+				if (retry.equals("o") || retry.equals("O"))
+				{
+					boolean mdpChoisi=false;
+					while (!mdpChoisi)
+					{
+						mdpChoisi=true;	
+						System.out.println("Nouveau mot de passe : (R pour un rappel)");
+						mdp = new String(c.readPassword());
+						if (mdp.equals("r") || mdp.equals("R"))
+						{
+							mdpChoisi=false;
+							System.out.println(newTip);
+						}
+					}
+					return doAction(c, args, f, mdp, newTip, log);
+				}
+			}
+			Thread.sleep(150);
+		} catch (NegativeArraySizeException | IllegalBlockSizeException | EOFException e)
+		{
+			success=false;
+			running=false;
+			log="Fichier est déjà décrypté.";
+			Thread.sleep(150);
+		} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException e)
+		{
+			success=false;
+			running=false;
+			log=e.getMessage();
+			Thread.sleep(150);
+		}
+		running=false;
+		return success;
 	}
 
 }

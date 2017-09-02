@@ -1,0 +1,1 @@
+java -jar "C:\Users\viclew\AppData\Local\MyEncrypterTool\Encrypter.jar" D %*

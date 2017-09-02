@@ -476,7 +476,7 @@ public class Encrypter
 				{
 				}
 			}
-			if (tip==null)
+			if (tips.isEmpty())
 			{
 				System.out.println("Ce(s) fichier(s) ne sont pas encryptés.");
 				Thread.sleep(2000);

@@ -35,18 +35,24 @@ public class Encrypter
 	public static String KEY;
 	public static String KEY_TIP;
 	public static Preferences pref =  Preferences.userNodeForPackage( Encrypter.class );
-	public static Thread printStateThread;
+	public static Thread printStateThread,fileAnalysisThread;
 	public static boolean running;
 	public static double totalSize;
 	public static double current=0;
+	public static String mdp,tip,log="";
+	public static boolean nToAll=false;
+	public static Console c = System.console();
+	public static Cipher MASTERdesCipher;
+	public static Cipher MASTERencrCipher;
+	public static List<String> nonCryptedFiles=new ArrayList<>();
 
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
 
-	public static void encrypt(File f, String root, String mdp, String tip) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException
+	public static void encrypt(File f) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException, CantEncryptException
 	{
 		Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, mdp);
-
 		String name;
+		String root=f.getParent();
 		try
 		{
 			byte[] nameBA = f.getName().getBytes();
@@ -67,7 +73,7 @@ public class Encrypter
 		{
 			for (File ff : f.listFiles())
 			{
-				encrypt(ff,f.getAbsolutePath(), mdp, tip);
+				encrypt(ff);
 			}
 			Files.move(f.toPath(), f2.toPath());
 		}
@@ -77,8 +83,17 @@ public class Encrypter
 			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(f2,false));
 			DataOutputStream dos = new DataOutputStream(bos);
 
-			dos.writeInt(tip.length());
-			dos.write(tip.getBytes());
+			try
+			{
+				byte[] encrTip=MASTERencrCipher.doFinal(tip.getBytes());
+				dos.writeInt(encrTip.length);
+				dos.write(encrTip);
+			} catch (IllegalBlockSizeException | BadPaddingException e1)
+			{
+				fis.close();
+				dos.close();
+				throw new CantEncryptException();
+			}
 			byte[] data=new byte[PACKET_SIZE];
 			while (fis.read(data)!=-1)
 			{
@@ -105,11 +120,12 @@ public class Encrypter
 		}
 	}
 
-	public static void decrypt(File f, String root, String mdp) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, IOException, EOFException, BadPaddingException
+	public static void decrypt(File f) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, IOException, EOFException, BadPaddingException
 	{
 		Cipher desCipher=initCipher(Cipher.DECRYPT_MODE, mdp);
 		boolean ok=true;
 		String name;
+		String root=f.getParent();
 		try
 		{
 			String fileName=f.getName();
@@ -135,7 +151,12 @@ public class Encrypter
 		{
 			for (File ff : f.listFiles())
 			{
-				decrypt(ff, f.getAbsolutePath(),  mdp);
+				try {
+					decrypt(ff);
+				} catch (Exception e)
+				{
+
+				}
 			}
 			if (ok)
 				Files.move(f.toPath(), f2.toPath());
@@ -224,7 +245,7 @@ public class Encrypter
 		return cipher;
 	}
 
-	private static void changePassword(Console c, Cipher encrCipher)
+	private static void changePassword(Cipher encrCipher)
 	{
 		String newPass = null, confirmNewPass;
 		boolean ok=false;
@@ -281,7 +302,8 @@ public class Encrypter
 			@Override
 			public void run()
 			{
-				System.out.print("Avancement : 0%");
+				System.out.println("");
+				System.out.print("\rAvancement : 0%\r");
 				while (running)
 				{
 					printAvancement();
@@ -292,6 +314,41 @@ public class Encrypter
 					{
 						e.printStackTrace();
 					}
+				}
+			}
+		});
+	}
+
+	private static void initFileAnalysisThread()
+	{
+		fileAnalysisThread=new Thread(new Runnable()
+		{
+
+			String symbol="-";
+
+			@Override
+			public void run()
+			{
+				System.out.println("");
+				System.out.print("\rAnalyse des fichiers en cours : "+symbol+"\r");
+				while (running)
+				{
+					System.out.print("\rAnalyse des fichiers en cours : "+symbol+"                       \r");
+					try
+					{
+						Thread.sleep(100);
+					} catch (InterruptedException e)
+					{
+						e.printStackTrace();
+					}
+					if (symbol.equals("-"))
+						symbol="\\";
+					else if (symbol.equals("\\"))
+						symbol="|";
+					else if (symbol.equals("|"))
+						symbol="/";
+					else if (symbol.equals("/"))
+						symbol="-";
 				}
 			}
 		});
@@ -331,23 +388,19 @@ public class Encrypter
 			new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
 		} catch (IOException e1) {}
 
-		Console c = System.console();
-
-		Cipher desCipher=null;
-		Cipher encrCipher=null;
 		try
 		{
-			desCipher=initCipher(Cipher.DECRYPT_MODE, MASTER_KEY);
-			encrCipher=initCipher(Cipher.ENCRYPT_MODE, MASTER_KEY);
+			MASTERdesCipher=initCipher(Cipher.DECRYPT_MODE, MASTER_KEY);
+			MASTERencrCipher=initCipher(Cipher.ENCRYPT_MODE, MASTER_KEY);
 			byte[] encrKEY = pref.getByteArray("password", null);
 			if (encrKEY==null)
 			{
-				changePassword(c,encrCipher);
+				changePassword(MASTERencrCipher);
 			}
 			else
 			{
 				KEY_TIP=pref.get("tip",null);
-				KEY=new String(desCipher.doFinal(encrKEY));
+				KEY=new String(MASTERdesCipher.doFinal(encrKEY));
 			}
 		} catch (Exception e)
 		{
@@ -417,14 +470,14 @@ public class Encrypter
 							}
 						}
 					}
-					changePassword(c, encrCipher);
+					changePassword(MASTERencrCipher);
 				}
 				else
 					System.out.println("Mot de passe invalide.");
 			}
 		}
 
-		String mdp=null,confirm, tip=null;
+		String confirm;
 		if (args[0].equals("E") || args[0].equals("e")) 
 		{
 			mdpOk=false;
@@ -454,28 +507,24 @@ public class Encrypter
 		}
 		else if (args[0].equals("D")) 
 		{
+			initFileAnalysisThread();
+			running=true;
+			fileAnalysisThread.start();
+			Thread.sleep(10);
+
 			List<String> tips=new ArrayList<>();
 			for (int i=1;i<args.length;i++)
 			{
 				File f=new File(args[i]);
-				FileInputStream fis;
-				DataInputStream dis;
-				try
-				{
-					fis = new FileInputStream(f);
-					dis = new DataInputStream(fis);
-					int tipSz=dis.readInt();
-					byte[] tipArray=new byte[tipSz];
-					dis.readFully(tipArray);
-					tip=new String(tipArray);
-					fis.close();
-					dis.close();
-					if (!tips.contains(tip))
-						tips.add(tip);
-				} catch (Exception e) 
-				{
-				}
+				String fileTip = getTipFromFile(f);
+				if (fileTip==null)
+					nonCryptedFiles.add(f.getName());
+				else if (!tips.contains(fileTip))
+					tips.add(fileTip);
 			}
+
+			running=false;
+
 			if (tips.isEmpty())
 			{
 				System.out.println("Ce(s) fichier(s) ne sont pas encryptés.");
@@ -507,49 +556,72 @@ public class Encrypter
 		{
 			File f = new File(args[i]);
 			String fileName = f.getName();
-			String log="";
+			if (!nonCryptedFiles.contains(fileName))
+			{
+				running=true;
+				totalSize=totalLength(f);
+				current=0;
+				initPrintStateThread();
+				printStateThread.start();
+				Thread.sleep(10);
+				boolean success=doAction(args,f);
 
-			running=true;
-			totalSize=totalLength(f);
-			current=0;
-			initPrintStateThread();
-			printStateThread.start();
-
-			boolean success=false;
-			success = doAction(c,args,f,mdp,tip,log);
-
-			Thread.sleep(10);
-			System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
-			Thread.sleep(150);
+				Thread.sleep(10);
+				System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
+				Thread.sleep(150);
+			}
 		}
 		Thread.sleep(2000);
 	}
 
-	private static boolean doAction(Console c, String[] args, File f, String mdp, String tip, String log) throws InterruptedException, IOException
+	private static String getTipFromFile(File f)
+	{
+		String tip=null;
+		if (!f.isDirectory())
+		{
+			try
+			{
+				FileInputStream fis = new FileInputStream(f);
+				DataInputStream dis = new DataInputStream(fis);
+				int tipSz=dis.readInt();
+				byte[] tipArrayEncr=new byte[tipSz];
+				dis.readFully(tipArrayEncr);
+				byte[] tipArray = MASTERdesCipher.doFinal(tipArrayEncr);
+				tip=new String(tipArray);
+				fis.close();
+				dis.close();
+			} catch (Exception e) {}
+		}
+		else
+		{
+			for (File ff : f.listFiles())
+			{
+				String subFileTip=getTipFromFile(ff);
+				if (subFileTip!=null)
+					return subFileTip;
+			}
+		}
+		return tip;
+	}
+
+	private static boolean doAction(String[] args, File f) throws InterruptedException, IOException
 	{
 		boolean success=true;
 		try
 		{
 			if (args[0].equals("E") || args[0].equals("e")) 
-				encrypt(f,f.getParent(),mdp, tip);
+				encrypt(f);
 			else if (args[0].equals("D")) 
-				decrypt(f,f.getParent(), mdp);
+				decrypt(f);
 		} catch (BadPaddingException e)
 		{
 			success=false;
 			running=false;
 
-			FileInputStream fis= new FileInputStream(f);
-			DataInputStream dis = new DataInputStream(fis);
-			int tipSz=dis.readInt();
-			byte[] tipArray=new byte[tipSz];
-			dis.readFully(tipArray);
-			String newTip=new String(tipArray);
-			fis.close();
-			dis.close();
+			tip=getTipFromFile(f);
 
 			log="Mot de passe invalide.";
-			if (args[0].equals("d") || args[0].equals("D"))
+			if (!nToAll && (args[0].equals("d") || args[0].equals("D")))
 			{
 				System.out.println("Mot de passe invalide, en essayer un autre ? (o/n)");
 				String retry=c.readLine();
@@ -564,10 +636,19 @@ public class Encrypter
 						if (mdp.equals("r") || mdp.equals("R"))
 						{
 							mdpChoisi=false;
-							System.out.println(newTip);
+							System.out.println(" - "+tip);
 						}
 					}
-					return doAction(c, args, f, mdp, newTip, log);
+					return doAction(args, f);
+				}
+				else if (retry.equals("n") || retry.equals("N"))
+				{
+					System.out.println("Redemander en cas d'erreur pour les autres fichiers ? (o/n)");
+					String noForever=c.readLine();
+					if (noForever.equals("o") || noForever.equals("O"))
+						nToAll=false;
+					else
+						nToAll=true;
 				}
 			}
 			Thread.sleep(150);
@@ -577,7 +658,7 @@ public class Encrypter
 			running=false;
 			log="Fichier est déjà décrypté.";
 			Thread.sleep(150);
-		} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException e)
+		} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException | CantEncryptException e)
 		{
 			success=false;
 			running=false;
@@ -585,6 +666,7 @@ public class Encrypter
 			Thread.sleep(150);
 		}
 		running=false;
+		log="";
 		return success;
 	}
 

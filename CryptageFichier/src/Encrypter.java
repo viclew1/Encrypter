@@ -53,8 +53,10 @@ public class Encrypter
 	public static String ENCRYPTED_TAG;
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
 
-	public static void encrypt(File f) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException, CantEncryptException
+	public static void encrypt(File f) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException, CantEncryptException, ZipException
 	{
+		if (f.getName().endsWith(".zip"))
+			throw new ZipException();
 		Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, mdp);
 		String name;
 		String root=f.getParent();
@@ -624,6 +626,10 @@ public class Encrypter
 				encrypt(f);
 			else if (args[0].equals("D")) 
 				decrypt(f);
+		} catch (ZipException e) {
+			success=false;
+			running=false;
+			log=e.getMessage();
 		} catch (BadPaddingException e)
 		{
 			success=false;

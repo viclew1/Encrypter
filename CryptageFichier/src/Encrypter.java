@@ -35,7 +35,7 @@ public class Encrypter
 	public static String KEY;
 	public static String KEY_TIP;
 	public static Preferences pref =  Preferences.userNodeForPackage( Encrypter.class );
-	public static Thread printStateThread,printAnalysisThread;
+	public static Thread printStateThread,printAnalysisThread, countFilesThread;
 	public static boolean running;
 	public static double totalSize;
 	public static double current=0;
@@ -47,8 +47,8 @@ public class Encrypter
 	public static List<String> tips = new ArrayList<>();
 	public static List<String> nonCryptedFiles=new ArrayList<>();
 	public static int nbFail,nbFile;
-	public static int totalFilesToScan,currentFileScanned=0;
-	
+	public static int totalFilesToScan=0,currentFileScanned=0;
+
 	public static String TAG = "CryptedByMyEncrypterTool";
 	public static String ENCRYPTED_TAG;
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
@@ -335,7 +335,20 @@ public class Encrypter
 			}
 		});
 	}
-	
+
+	private static void initCountFilesThread(String[] args)
+	{
+		countFilesThread=new Thread(new Runnable()
+		{
+
+			@Override
+			public void run()
+			{
+				nbFile(args);
+			}
+		});
+	}
+
 	private static void initPrintStateThread()
 	{
 		printStateThread=new Thread(new Runnable()
@@ -515,9 +528,10 @@ public class Encrypter
 		}
 		else if (args[0].equals("D")) 
 		{
-			totalFilesToScan=nbFile(args);
+			initCountFilesThread(args);
 			initPrintAnalysesThread();
 			running=true;
+			countFilesThread.start();
 			printAnalysisThread.start();
 			Thread.sleep(10);
 
@@ -525,7 +539,7 @@ public class Encrypter
 			running=false;
 
 			Thread.sleep(100);
-			
+
 			if (tips.isEmpty())
 			{
 				System.out.println("Ce(s) fichier(s) ne sont pas encryptés.");
@@ -595,7 +609,13 @@ public class Encrypter
 				dis.readFully(tagArray);
 				MASTERdesCipher.doFinal(tagArray);
 				int tipSz=dis.readInt();
-				byte[] tipArrayEncr=new byte[tipSz];
+				byte[] tipArrayEncr;
+				try{
+					tipArrayEncr=new byte[tipSz];
+				} catch (OutOfMemoryError e)
+				{
+					throw new Exception();
+				}
 				dis.readFully(tipArrayEncr);
 				byte[] tipArray = MASTERdesCipher.doFinal(tipArrayEncr);
 				tip=new String(tipArray);
@@ -710,24 +730,20 @@ public class Encrypter
 		}
 	}
 
-	private static int nbFile(File f)
+	private static void nbFile(File f)
 	{
 		if (!f.isDirectory())
-			return 1;
-		int cpt=1;
+			{
+			totalFilesToScan++;
+			return;
+			}
 		for (File ff : f.listFiles())
-			cpt+=nbFile(ff);
-		return cpt;
-
+			nbFile(ff);
 	}
 
-	private static int nbFile(String[] args)
+	private static void nbFile(String[] args)
 	{
-		int cpt=0;
 		for (int i=1;i<args.length;i++)
-		{
-			cpt+=nbFile(new File(args[i]));
-		}
-		return cpt;
+			nbFile(new File(args[i]));
 	}
 }

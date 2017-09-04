@@ -159,7 +159,7 @@ public class Encrypter
 		{
 			for (File ff : f.listFiles())
 			{
-				if (nonCryptedFiles.contains(ff.getName()))
+				if (nonCryptedFiles.contains(ff.getAbsolutePath()))
 					continue;
 				if (!ff.isDirectory())
 					nbFile++;
@@ -226,12 +226,14 @@ public class Encrypter
 		System.out.print("\rAvancement : "+(int)(current*100/totalSize)+"%                       \r");
 	}
 
-	private static int totalLength(File f)
+	private static double totalLength(File f)
 	{
+		if (nonCryptedFiles.contains(f.getAbsolutePath()))
+			return 0;
 		int size=0;
 		if (!f.isDirectory())
 		{
-			return (int)f.length();
+			return f.length();
 		}
 		else
 		{
@@ -555,7 +557,7 @@ public class Encrypter
 		{
 			File f = new File(args[i]);
 			String fileName = f.getName();
-			if (!nonCryptedFiles.contains(fileName))
+			if (!nonCryptedFiles.contains(f.getAbsolutePath()))
 			{
 				nbFile=0;
 				nbFail=0;
@@ -601,8 +603,8 @@ public class Encrypter
 				dis.close();
 				tips.add(tip);
 			} catch (Exception e) {
-				if (!nonCryptedFiles.contains(f.getName()))
-					nonCryptedFiles.add(f.getName());
+				if (!nonCryptedFiles.contains(f.getAbsolutePath()))
+					nonCryptedFiles.add(f.getAbsolutePath());
 			}
 		}
 		else
@@ -611,8 +613,8 @@ public class Encrypter
 			for (File ff : f.listFiles())
 				for (String str : getTipFromFile(ff))
 					tips.add(str);
-			if (tips.isEmpty() && !nonCryptedFiles.contains(f.getName()))
-				nonCryptedFiles.add(f.getName());
+			if (tips.isEmpty() && !nonCryptedFiles.contains(f.getAbsolutePath()))
+				nonCryptedFiles.add(f.getAbsolutePath());
 		}
 		return tips;
 	}

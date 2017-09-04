@@ -55,7 +55,7 @@ public class Encrypter
 
 	public static void encrypt(File f) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException, CantEncryptException, ZipException
 	{
-		if (f.getName().endsWith(".zip"))
+		if (f.getName().endsWith(".zip") || f.getName().endsWith(".7z") || f.getName().endsWith(".jar"))
 			throw new ZipException();
 		Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, mdp);
 		String name;

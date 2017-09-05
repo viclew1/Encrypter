@@ -2,21 +2,21 @@ import java.io.BufferedOutputStream;
 import java.io.Console;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
-import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
 import java.nio.file.Files;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.prefs.BackingStoreException;
 import java.util.prefs.Preferences;
 
@@ -31,193 +31,225 @@ import javax.crypto.spec.SecretKeySpec;
 public class Encrypter
 {
 
-	public static String MASTER_KEY="WTdg2>ug2G{9.L8S";
-	public static String KEY;
-	public static String KEY_TIP;
+	public static final int DIR=1;
+	public static final int FILE=2;
+	public static final int NEXTFILE=-1;
+	public static final int END=-2;
+
+	public static final int DECRYPT_MODE=1;
+	public static final int ENCRYPT_MODE=2;
+
+	public static int MODE;
+
 	public static Preferences pref =  Preferences.userNodeForPackage( Encrypter.class );
-	public static Thread printStateThread,printAnalysisThread, countFilesThread;
-	public static boolean running;
-	public static double totalSize;
-	public static double current=0;
-	public static String mdp,tip,log="";
-	public static boolean nToAll=false;
-	public static Console c = System.console();
+
+	public static final String MASTER_KEY="WTdg2>ug2G{9.L8S";
 	public static Cipher MASTERdesCipher;
 	public static Cipher MASTERencrCipher;
-	public static List<String> tips = new ArrayList<>();
-	public static List<String> nonCryptedFiles=new ArrayList<>();
+
+	public static String KEY;
+	public static String KEY_TIP;
+
+	public static String mdp,tip,log="";
+
+	public static Thread printStateThread,printAnalysisThread,countFilesThread;
 	public static int nbFail,nbFile;
 	public static int totalFilesToScan=0,currentFileScanned=0;
+	public static double totalSize,current=0;
+	public static boolean running;
+
+	public static boolean nToAll=false;
+	public static Console c = System.console();
+	public static List<String> tips = new ArrayList<>();
+	public static List<String> cryptedFiles=new ArrayList<>();
 
 	public static String TAG = "CryptedByMyEncrypterTool";
-	public static String ENCRYPTED_TAG;
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
 
-	public static void encrypt(File f) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IOException, CantEncryptException, ZipException
+	public static void initEncrypt(File f, File outFile, String pass) throws CantEncryptException, IOException
 	{
-		if (f.getName().endsWith(".zip") || f.getName().endsWith(".7z") || f.getName().endsWith(".jar"))
-			throw new ZipException();
-		Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, mdp);
-		String name;
-		String root=f.getParent();
-		try
-		{
-			byte[] nameBA = f.getName().getBytes();
-			byte[] encrNameBA = encrCipher.doFinal(nameBA);
-			encrNameBA = Base64.getEncoder().encode(encrNameBA);
-			String fileName=new String(encrNameBA);
-			fileName = fileName.replaceAll("\\\\", URLEncoder.encode("\\","UTF-8"));
-			fileName = fileName.replaceAll("/", URLEncoder.encode("/","UTF-8"));
-			fileName = fileName.replaceAll("=", URLEncoder.encode("=","UTF-8"));
-			name = root+"/"+fileName;
+		try {
+			
+			if (f.getName().endsWith(".zip") || f.getName().endsWith(".7z") || f.getName().endsWith(".jar"))
+				throw new CantEncryptException();
+			
+			int i=0;
+			while (outFile.exists())
+				outFile=new File(outFile.getAbsolutePath()+" ("+(++i)+")");
+
+			Cipher encrCipher=initCipher(Cipher.ENCRYPT_MODE, pass);
+			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(outFile,false));
+			DataOutputStream dos = new DataOutputStream(bos);
+
+			dos.write(TAG.getBytes());
+
+			byte[] encrTip=MASTERencrCipher.doFinal(tip.getBytes());
+			dos.writeInt(encrTip.length);
+			dos.write(encrTip);
+
+			encrypt(f,dos,encrCipher);
+
+			dos.writeInt(END);
+			dos.close();
+		} catch (Exception e) {
+			throw new CantEncryptException();
 		}
-		catch(BadPaddingException | IllegalBlockSizeException e)
-		{
-			name = root+"/"+f.getName();
-		}
-		File f2 = new File(name);
+		Files.delete(f.toPath());
+	}
+
+	public static void encrypt(File f, DataOutputStream dos, Cipher encrCipher) throws IOException, IllegalBlockSizeException, BadPaddingException
+	{
 		if (f.isDirectory())
 		{
-			for (File ff : f.listFiles())
+			dos.writeInt(DIR);
+			byte[] encrName=encrCipher.doFinal(f.getName().getBytes());
+			dos.writeInt(encrName.length);
+			dos.write(encrName);
+			File[] files=f.listFiles();
+			int nbFiles=files.length;
+			for (int i=0 ; i<nbFiles ; i++)
 			{
-				encrypt(ff);
+				File ff = files[i];
+				encrypt(ff,dos,encrCipher);
+				Files.delete(ff.toPath());
 			}
-			Files.move(f.toPath(), f2.toPath());
 		}
 		else
 		{
 			FileInputStream fis = new FileInputStream(f);
-			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(f2,false));
-			DataOutputStream dos = new DataOutputStream(bos);
 
-			try
-			{
-				dos.write(ENCRYPTED_TAG.getBytes());
-				byte[] encrTip=MASTERencrCipher.doFinal(tip.getBytes());
-				dos.writeInt(encrTip.length);
-				dos.write(encrTip);
-			} catch (IllegalBlockSizeException | BadPaddingException e1)
-			{
-				fis.close();
-				dos.close();
-				throw new CantEncryptException();
-			}
+			dos.writeInt(FILE);
+			byte[] encrName=encrCipher.doFinal(f.getName().getBytes());
+			dos.writeInt(encrName.length);
+			dos.write(encrName);
+
 			byte[] data=new byte[PACKET_SIZE];
-			while (fis.read(data)!=-1)
+			while ((fis.read(data))!=-1)
 			{
-				byte[] encryptedFile = null;
-				try
-				{
-					encryptedFile = encrCipher.doFinal(data);
-				} catch (Exception e)
-				{
-					e.printStackTrace();
-				}
+				byte[] encryptedFile = encrCipher.doFinal(data);
 				dos.writeInt(encryptedFile.length);
-				for (int i=0;i<encryptedFile.length;i++)
+				int sz=encryptedFile.length;
+				for (int i=0;i<sz;i++)
 				{
 					dos.write(encryptedFile[i]);
-					current+=1;
+					current++;
 				}
 			}
-			dos.writeInt(-1);
+			dos.writeInt(NEXTFILE);
 			fis.close();
-			bos.close();
-
-			Files.delete(f.toPath());
 		}
 	}
 
-	public static void decrypt(File f) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, IOException, EOFException, BadPaddingException
+	public static void initDecrypt(File f, String pass) throws CantDecryptException, WrongPasswordException, IOException
 	{
-		Cipher desCipher=initCipher(Cipher.DECRYPT_MODE, mdp);
-		boolean ok=true;
-		String name;
-		String root=f.getParent();
-		try
-		{
-			String fileName=f.getName();
-			fileName = fileName.replaceAll(URLEncoder.encode("=","UTF-8"), "=");
-			fileName = fileName.replaceAll(URLEncoder.encode("/","UTF-8"), "/");
-			fileName = fileName.replaceAll(URLEncoder.encode("\\","UTF-8"), "\\");
-			byte[] desNameBA = Base64.getDecoder().decode(fileName.getBytes());
-			desNameBA = desCipher.doFinal(desNameBA);
-			fileName=new String(desNameBA);
-			fileName = fileName.replaceAll("\\\\", URLEncoder.encode("\\","UTF-8"));
-			fileName = fileName.replaceAll("/", URLEncoder.encode("/","UTF-8"));
-			fileName = fileName.replaceAll("=", URLEncoder.encode("=","UTF-8"));
-			name = root+"/"+fileName;
-		}
-		catch (Exception e)
-		{
-			ok=false;
-			name = root + "/" + f.getName()+"tmp";
-		}
-		File f2 = new File(name);
-
-		if (f.isDirectory())
-		{
-			for (File ff : f.listFiles())
+		try {
+			if (f.isDirectory())
 			{
-				if (nonCryptedFiles.contains(ff.getAbsolutePath()))
-					continue;
-				if (!ff.isDirectory())
-					nbFile++;
-				try {
-					decrypt(ff);
-				} catch (Exception e)
+				File[] files=f.listFiles();
+				int nbFiles=files.length;
+				for (int i=0 ; i<nbFiles ; i++)
 				{
-					nbFail++;
+					File ff = files[i];
+					if (cryptedFiles.contains(ff.getAbsolutePath()))
+						initDecrypt(ff, pass);
 				}
+				return;
 			}
-			if (ok)
-				Files.move(f.toPath(), f2.toPath());
-		}
-		else
-		{
+			Cipher desCipher=initCipher(Cipher.DECRYPT_MODE, pass);
 			FileInputStream fis = new FileInputStream(f);
 			DataInputStream dis = new DataInputStream(fis);
-			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(f2,false));
+			byte[] tagArray = new byte[TAG.length()];
+			dis.readFully(tagArray);
+			String fileTag=new String(tagArray);
+			if (!fileTag.equals(TAG))
+			{
+				dis.close();
+				throw new CantDecryptException();
+			}
+
+			int tipSize = dis.readInt();
+			byte[] encrTipArray = new byte[tipSize];
+			dis.readFully(encrTipArray);
+			MASTERdesCipher.doFinal(encrTipArray);
+
+			decrypt(dis, desCipher, f.getParent()+"/");
+
+			dis.close();
+		} catch (BadPaddingException e) {
+			throw new WrongPasswordException();
+		} catch (Exception e) {
+			throw new CantDecryptException();
+		}
+		Files.delete(f.toPath());
+	}
+
+	public static void decrypt(DataInputStream dis, Cipher desCipher, String root) throws CantDecryptException, IllegalBlockSizeException, BadPaddingException, IOException
+	{
+		int type = dis.readInt();
+
+		int nameSz;
+		byte[] encrNameArray;
+		String name;
+		File outFile;
+		int cpt=0;
+
+		switch (type)
+		{
+		case DIR:
+			nameSz = dis.readInt();
+			encrNameArray = new byte[nameSz];
+			dis.readFully(encrNameArray);
+			name = new String(desCipher.doFinal(encrNameArray));
+			outFile = new File(root+name);
+			while (outFile.exists())
+				outFile=new File(root+name+" ("+(++cpt)+")");
+
+			outFile.mkdir();
+			decrypt(dis,desCipher,root+outFile.getName()+"/");
+			break;
+		case FILE:
+			nameSz = dis.readInt();
+			encrNameArray = new byte[nameSz];
+			dis.readFully(encrNameArray);
+			name = new String(desCipher.doFinal(encrNameArray));
+			outFile = new File(root+name);
+			if (outFile.exists())
+			{
+				int indexSep=name.length()-1;
+				for (int i=0;i<name.length();i++)
+				{
+					char c = name.charAt(i);
+					if (c=='.')
+						indexSep=i;
+				}
+				String prefix=name.substring(0, indexSep);
+				String suffix=name.substring(indexSep,name.length());
+				while (outFile.exists())
+					outFile=new File(root+prefix+" ("+(++cpt)+") "+suffix);
+			}
+
+			BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(outFile,false));
 			int sz;
 			byte[] decryptedFile = null;
-			try
+
+			while ((sz=dis.readInt())!=NEXTFILE)
 			{
-				byte[] tagArray = new byte[ENCRYPTED_TAG.length()];
-				dis.readFully(tagArray);
-				MASTERdesCipher.doFinal(tagArray);
-				int tipSz=dis.readInt();
-				dis.readFully(new byte[tipSz]);
-				while ((sz=dis.readInt())!=-1)
+				byte[] data = new byte[sz];
+				dis.readFully(data);
+				decryptedFile = desCipher.doFinal(data);
+				for (int i=0;i<decryptedFile.length;i++)
 				{
-					byte[] data = new byte[sz];
-					dis.readFully(data);
-					decryptedFile = desCipher.doFinal(data);
-					for (int i=0;i<decryptedFile.length;i++)
-					{
-						bos.write(decryptedFile[i]);
-						current+=1;
-					}
-				}
-			} catch (EOFException e)
-			{
-				ok=false;
-				throw new EOFException();
-			} catch (NegativeArraySizeException e)
-			{
-				ok=false;
-				throw new NegativeArraySizeException();
-			} finally {
-				dis.close();
-				bos.close();
-				if (ok)
-				{
-					Files.delete(f.toPath());
-				}
-				else
-				{
-					Files.delete(f2.toPath());
+					bos.write(decryptedFile[i]);
+					current++;
 				}
 			}
+			bos.close();
+			decrypt(dis,desCipher,root);
+			break;
+		case END:
+			return;
+		default:
+			throw new CantDecryptException();
 		}
 	}
 
@@ -228,8 +260,6 @@ public class Encrypter
 
 	private static double totalLength(File f)
 	{
-		if (nonCryptedFiles.contains(f.getAbsolutePath()))
-			return 0;
 		int size=0;
 		if (!f.isDirectory())
 		{
@@ -237,8 +267,11 @@ public class Encrypter
 		}
 		else
 		{
-			for (File ff : f.listFiles())
+			File[] files=f.listFiles();
+			int nbFiles=files.length;
+			for (int i=0 ; i<nbFiles ; i++)
 			{
+				File ff = files[i];
 				size+=totalLength(ff);
 			}
 		}
@@ -344,7 +377,13 @@ public class Encrypter
 			@Override
 			public void run()
 			{
-				nbFile(args);
+				try
+				{
+					nbFile(args);
+				} catch (InterruptedException e)
+				{
+					e.printStackTrace();
+				}
 			}
 		});
 	}
@@ -374,20 +413,20 @@ public class Encrypter
 		});
 	}
 
-	private static void printStart(String[] args, boolean encrMode)
+	private static void printStart(String[] args)
 	{
 		System.out.println("*************************************************************");
 		if (args.length==2)
 		{
 			File f = new File(args[1]);
-			if (encrMode)
+			if (MODE==ENCRYPT_MODE)
 				System.out.println("ENCRYPTAGE DU FICHIER : \n     - "+f.getAbsolutePath());
 			else
 				System.out.println("DECRYPTAGE DU FICHIER : \n     - "+f.getAbsolutePath());
 		}
 		else
 		{
-			if (encrMode)
+			if (MODE==ENCRYPT_MODE)
 				System.out.println("ENCRYPTAGE DES FICHIERS : ");
 			else
 				System.out.println("DECRYPTAGE DES FICHIERS : ");
@@ -403,6 +442,7 @@ public class Encrypter
 
 	public static void main(String[] args) throws InterruptedException, BackingStoreException, IOException
 	{
+
 		try
 		{
 			new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
@@ -410,9 +450,28 @@ public class Encrypter
 
 		try
 		{
+			switch (args[0])
+			{
+			case "d":
+				MODE=DECRYPT_MODE;
+				break;
+			case "D":
+				MODE=DECRYPT_MODE;
+				break;
+			case "e":
+				MODE=ENCRYPT_MODE;
+				break;
+			case "E":
+				MODE=ENCRYPT_MODE;
+				break;
+			default:
+				System.out.println("Erreur : Argument invalide : le 1er argument doit être E (pour encrypter) ou D (pour décrypter)");
+				Thread.sleep(10000);
+				System.exit(0);
+			}
+
 			MASTERdesCipher=initCipher(Cipher.DECRYPT_MODE, MASTER_KEY);
 			MASTERencrCipher=initCipher(Cipher.ENCRYPT_MODE, MASTER_KEY);
-			ENCRYPTED_TAG=new String(MASTERencrCipher.doFinal(TAG.getBytes()));
 			byte[] encrKEY = pref.getByteArray("password", null);
 			if (encrKEY==null)
 			{
@@ -439,24 +498,7 @@ public class Encrypter
 			System.exit(0);
 		}
 
-		boolean encrMode=false;
-		switch (args[0])
-		{
-		case "d":
-			break;
-		case "D":
-			break;
-		case "e":
-			encrMode=true;
-			break;
-		case "E":
-			encrMode=true;
-			break;
-		default:
-			System.exit(0);
-		}
-
-		printStart(args,encrMode);
+		printStart(args);
 
 
 
@@ -499,7 +541,7 @@ public class Encrypter
 		}
 
 		String confirm;
-		if (args[0].equals("E") || args[0].equals("e")) 
+		if (MODE==ENCRYPT_MODE) 
 		{
 			mdpOk=false;
 			while (!mdpOk)
@@ -525,8 +567,10 @@ public class Encrypter
 			}
 			System.out.println("Ecrivez une phrase de rappel de votre mot de passe pour ce(s) fichier(s) :");
 			tip=c.readLine();
+			if (tip==null || tip.equals(""))
+				tip="Aucune aide entrée.";
 		}
-		else if (args[0].equals("D")) 
+		else
 		{
 			initCountFilesThread(args);
 			initPrintAnalysesThread();
@@ -535,7 +579,7 @@ public class Encrypter
 			printAnalysisThread.start();
 			Thread.sleep(10);
 
-			generateTipsAndNonCryptedFilesList(args);
+			generateTipsAndCryptedFilesList(args);
 			running=false;
 
 			Thread.sleep(100);
@@ -560,38 +604,32 @@ public class Encrypter
 				}
 			}
 		}
-		else 
-		{
-			System.out.println("Ordre invalide (ni Decrypt, ni Encrypt).");
-			Thread.sleep(2000);
-			System.exit(0);
-		}
 
-		for (int i=1;i<args.length;i++)
-		{
-			File f = new File(args[i]);
-			String fileName = f.getName();
-			if (!nonCryptedFiles.contains(f.getAbsolutePath()))
-			{
-				nbFile=0;
-				nbFail=0;
-				running=true;
-				totalSize=totalLength(f);
-				current=0;
-				initPrintStateThread();
-				printStateThread.start();
-				Thread.sleep(10);
-				boolean success=doAction(args,f);
+		if (MODE==ENCRYPT_MODE) 
+			for (int i=1;i<args.length;i++)
+				initAction(new File(args[i]));
+		else if (MODE==DECRYPT_MODE) 
+			for (String fileName : cryptedFiles)
+				initAction(new File(fileName));
 
-				Thread.sleep(10);
-				if (!f.isDirectory())
-					System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+(success?" Réussi : ":" Echoué : ")+ fileName +" "+log);
-				else
-					System.out.println(((args[0].equals("E") || args[0].equals("e"))?"Encryptage":"Décryptage")+" Réussi : "+"("+(nbFile-nbFail)+"/"+nbFile+") : "+ fileName);
-				Thread.sleep(150);
-			}
-		}
 		Thread.sleep(2000);
+	}
+
+	private static void initAction(File f) throws InterruptedException, IOException
+	{
+		nbFile=0;
+		nbFail=0;
+		running=true;
+		totalSize=totalLength(f);
+		current=0;
+		initPrintStateThread();
+		printStateThread.start();
+		Thread.sleep(10);
+		boolean success=doAction(f);
+
+		Thread.sleep(10);
+		System.out.println((MODE==DECRYPT_MODE?"Décryptage":"Encryptage")+(success?" Réussi : ":" Echoué : ")+ f.getName() +" "+log);
+		Thread.sleep(150);
 	}
 
 	private static List<String> getTipFromFile(File f)
@@ -600,91 +638,84 @@ public class Encrypter
 		String tip=null;
 		if (!f.isDirectory())
 		{
+			currentFileScanned++;
 			try
 			{
-				currentFileScanned++;
 				FileInputStream fis = new FileInputStream(f);
 				DataInputStream dis = new DataInputStream(fis);
-				byte[] tagArray = new byte[ENCRYPTED_TAG.length()];
+				byte[] tagArray = new byte[TAG.length()];
 				dis.readFully(tagArray);
-				MASTERdesCipher.doFinal(tagArray);
-				int tipSz=dis.readInt();
-				byte[] tipArrayEncr;
-				try{
-					tipArrayEncr=new byte[tipSz];
-				} catch (OutOfMemoryError e)
+				if (!new String(tagArray).equals(TAG))
 				{
+					dis.close();
 					throw new Exception();
 				}
+				int tipSz=dis.readInt();
+				byte[] tipArrayEncr=new byte[tipSz];
 				dis.readFully(tipArrayEncr);
 				byte[] tipArray = MASTERdesCipher.doFinal(tipArrayEncr);
 				tip=new String(tipArray);
 				fis.close();
 				dis.close();
 				tips.add(tip);
-			} catch (Exception e) {
-				if (!nonCryptedFiles.contains(f.getAbsolutePath()))
-					nonCryptedFiles.add(f.getAbsolutePath());
+				cryptedFiles.add(f.getAbsolutePath());
+			} catch (OutOfMemoryError | Exception e) {
+
 			}
 		}
 		else
 		{
-			currentFileScanned++;
-			for (File ff : f.listFiles())
+			File[] files=f.listFiles();
+			int nbFiles=files.length;
+			for (int i=0 ; i<nbFiles ; i++)
+			{
+				File ff = files[i];
 				for (String str : getTipFromFile(ff))
 					tips.add(str);
-			if (tips.isEmpty() && !nonCryptedFiles.contains(f.getAbsolutePath()))
-				nonCryptedFiles.add(f.getAbsolutePath());
+			}
 		}
 		return tips;
 	}
 
-	private static boolean doAction(String[] args, File f) throws InterruptedException, IOException
+	private static boolean doAction(File f) throws InterruptedException, IOException
 	{
 		boolean success=true;
 		try
 		{
-			if (args[0].equals("E") || args[0].equals("e")) 
-				encrypt(f);
-			else if (args[0].equals("D")) 
-				decrypt(f);
-		} catch (ZipException e) {
+			if (MODE==ENCRYPT_MODE) 
+				initEncrypt(f, new File(f.getParent()+"/ENCRYPTED_"+f.getName()), mdp);
+			else if (MODE==DECRYPT_MODE) 
+				initDecrypt(f,mdp);
+		} catch (CantEncryptException e) {
 			success=false;
 			running=false;
 			log=e.getMessage();
-		} catch (BadPaddingException e)
+		} catch (WrongPasswordException e)
 		{
 			success=false;
 			running=false;
-			success = retryDecrypt(f,args);
-		} catch (NegativeArraySizeException | IllegalBlockSizeException | EOFException e)
+			if (MODE==DECRYPT_MODE)
+				success = retryDecrypt(f);
+		} catch (CantDecryptException e)
 		{
 			success=false;
 			running=false;
-			log="Fichier est déjà décrypté.";
-		} catch(InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IOException | CantEncryptException e)
-		{
-			success=false;
-			running=false;
-			log=e.getMessage();
-		}
+			log="Impossible de décrypter le fichier.";
+		} 
+
 		running=false;
-		if (!nToAll && nbFile!=0 && nbFail==nbFile)
-		{
-			success = retryDecrypt(f, args);
-		}
 		if (success)
 			log="";
 		Thread.sleep(150);
 		return success;
 	}
 
-	private static boolean retryDecrypt(File f, String[] args) throws InterruptedException, IOException
+	private static boolean retryDecrypt(File f) throws InterruptedException, IOException
 	{
 		List<String> tips=getTipFromFile(f);
 
 		log="Mot de passe invalide.";
-		if (!nToAll && (args[0].equals("d") || args[0].equals("D")))
+		if (!nToAll)
 		{
 			System.out.println("Mot de passe invalide, en essayer un autre ? (o/n)");
 			String retry=c.readLine();
@@ -703,7 +734,7 @@ public class Encrypter
 							System.out.println(" - "+tip);
 					}
 				}
-				return doAction(args, f);
+				return doAction(f);
 			}
 			else if (retry.equals("n") || retry.equals("N"))
 			{
@@ -718,32 +749,61 @@ public class Encrypter
 		return false;
 	}
 
-	private static void generateTipsAndNonCryptedFilesList(String[] args)
+	private static void generateTipsAndCryptedFilesList(String[] args) throws InterruptedException
 	{
+		ExecutorService es = Executors.newCachedThreadPool();
 		for (int i=1;i<args.length;i++)
 		{
-			File f=new File(args[i]);
-			List<String> fileTips = getTipFromFile(f);
-			for (String fileTip : fileTips)
-				if (!tips.contains(fileTip))
-					tips.add(fileTip);
+			final int index = i;
+			es.submit(new Runnable()
+			{
+				@Override
+				public void run()
+				{
+					File f=new File(args[index]);
+					List<String> fileTips = getTipFromFile(f);
+					for (String fileTip : fileTips)
+						if (!tips.contains(fileTip))
+							tips.add(fileTip);
+				}
+			});
 		}
+		es.shutdown();
+		es.awaitTermination(60, TimeUnit.MINUTES);
 	}
 
 	private static void nbFile(File f)
 	{
 		if (!f.isDirectory())
-			{
+		{
 			totalFilesToScan++;
 			return;
-			}
-		for (File ff : f.listFiles())
+		}
+		File[] files=f.listFiles();
+		int nbFiles=files.length;
+		for (int i=0 ; i<nbFiles ; i++)
+		{
+			File ff = files[i];
 			nbFile(ff);
+		}
 	}
 
-	private static void nbFile(String[] args)
+	private static void nbFile(String[] args) throws InterruptedException
 	{
+		ExecutorService es = Executors.newCachedThreadPool();
 		for (int i=1;i<args.length;i++)
-			nbFile(new File(args[i]));
+		{
+			final int index = i;
+			es.submit(new Runnable()
+			{
+				@Override
+				public void run()
+				{
+					nbFile(new File(args[index]));
+				}
+			});
+		}
+		es.shutdown();
+		es.awaitTermination(60, TimeUnit.MINUTES);
 	}
 }

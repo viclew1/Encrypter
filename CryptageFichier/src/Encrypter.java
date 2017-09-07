@@ -64,15 +64,18 @@ public class Encrypter
 	public static List<String> cryptedFiles=new ArrayList<>();
 
 	public static String TAG = "CryptedByMyEncrypterTool";
+
 	public static final int PACKET_SIZE = (int)Math.pow(2, 20);
+	public static final int SMALL_PACKET_SIZE = 1024;
+	public static int countToSmallPacketSize=0;
 
 	public static void initEncrypt(File f, File outFile, String pass) throws CantEncryptException, IOException
 	{
 		try {
-			
+
 			if (f.getName().endsWith(".zip") || f.getName().endsWith(".7z") || f.getName().endsWith(".jar"))
 				throw new CantEncryptException();
-			
+
 			int i=0;
 			while (outFile.exists())
 				outFile=new File(outFile.getAbsolutePath()+" ("+(++i)+")");
@@ -113,6 +116,7 @@ public class Encrypter
 				encrypt(ff,dos,encrCipher);
 				Files.delete(ff.toPath());
 			}
+			dos.writeInt(NEXTFILE);
 		}
 		else
 		{
@@ -129,10 +133,19 @@ public class Encrypter
 				byte[] encryptedFile = encrCipher.doFinal(data);
 				dos.writeInt(encryptedFile.length);
 				int sz=encryptedFile.length;
-				for (int i=0;i<sz;i++)
+				int packetWritten=0;
+				while (sz>0)
 				{
-					dos.write(encryptedFile[i]);
-					current++;
+					dos.write(encryptedFile,packetWritten*SMALL_PACKET_SIZE,
+							sz<SMALL_PACKET_SIZE?sz:SMALL_PACKET_SIZE);
+					sz-=SMALL_PACKET_SIZE;
+					packetWritten++;
+					countToSmallPacketSize++;
+					if (countToSmallPacketSize>=SMALL_PACKET_SIZE)
+					{
+						current++;
+						countToSmallPacketSize=0;
+					}
 				}
 			}
 			dos.writeInt(NEXTFILE);
@@ -172,7 +185,12 @@ public class Encrypter
 			dis.readFully(encrTipArray);
 			MASTERdesCipher.doFinal(encrTipArray);
 
-			decrypt(dis, desCipher, f.getParent()+"/");
+			int type=0;
+			while (type!=END)
+			{
+				type=dis.readInt();
+				decrypt(type, dis, desCipher, f.getParent()+"/");
+			}
 
 			dis.close();
 		} catch (BadPaddingException e) {
@@ -183,10 +201,8 @@ public class Encrypter
 		Files.delete(f.toPath());
 	}
 
-	public static void decrypt(DataInputStream dis, Cipher desCipher, String root) throws CantDecryptException, IllegalBlockSizeException, BadPaddingException, IOException
+	public static void decrypt(int type, DataInputStream dis, Cipher desCipher, String root) throws CantDecryptException, IllegalBlockSizeException, BadPaddingException, IOException
 	{
-		int type = dis.readInt();
-
 		int nameSz;
 		byte[] encrNameArray;
 		String name;
@@ -205,7 +221,10 @@ public class Encrypter
 				outFile=new File(root+name+" ("+(++cpt)+")");
 
 			outFile.mkdir();
-			decrypt(dis,desCipher,root+outFile.getName()+"/");
+			int nextType=0;
+			while ((nextType=dis.readInt())!=NEXTFILE)
+				decrypt(nextType,dis,desCipher,root+outFile.getName()+"/");
+
 			break;
 		case FILE:
 			nameSz = dis.readInt();
@@ -237,14 +256,23 @@ public class Encrypter
 				byte[] data = new byte[sz];
 				dis.readFully(data);
 				decryptedFile = desCipher.doFinal(data);
-				for (int i=0;i<decryptedFile.length;i++)
+				int packetWritten=0;
+				sz=decryptedFile.length;
+				while (sz>0)
 				{
-					bos.write(decryptedFile[i]);
-					current++;
+					bos.write(decryptedFile,packetWritten*SMALL_PACKET_SIZE,
+							sz<SMALL_PACKET_SIZE?sz:SMALL_PACKET_SIZE);
+					sz-=SMALL_PACKET_SIZE;
+					packetWritten++;
+					countToSmallPacketSize++;
+					if (countToSmallPacketSize>=SMALL_PACKET_SIZE)
+					{
+						current++;
+						countToSmallPacketSize=0;
+					}
 				}
 			}
 			bos.close();
-			decrypt(dis,desCipher,root);
 			break;
 		case END:
 			return;
@@ -258,12 +286,12 @@ public class Encrypter
 		System.out.print("\rAvancement : "+(int)(current*100/totalSize)+"%                       \r");
 	}
 
-	private static double totalLength(File f)
+	private static double totalLength(File f) throws IOException
 	{
 		int size=0;
 		if (!f.isDirectory())
 		{
-			return f.length();
+			return Files.size(f.toPath())/SMALL_PACKET_SIZE;
 		}
 		else
 		{
@@ -622,6 +650,7 @@ public class Encrypter
 		running=true;
 		totalSize=totalLength(f);
 		current=0;
+		countToSmallPacketSize=0;
 		initPrintStateThread();
 		printStateThread.start();
 		Thread.sleep(10);
